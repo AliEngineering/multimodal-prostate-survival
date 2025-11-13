@@ -79,7 +79,9 @@ def preprocess_mri(vol: np.ndarray, mask: np.ndarray,
     """
     C, Z, Y, X = vol.shape
     nz = np.where(mask > 0)
+
     if len(nz[0]) == 0:
+        # no mask at all → use full volume
         zmin, zmax = 0, Z
         ymin, ymax = 0, Y
         xmin, xmax = 0, X
@@ -91,13 +93,21 @@ def preprocess_mri(vol: np.ndarray, mask: np.ndarray,
         zmin = max(zmin - pad, 0)
         ymin = max(ymin - pad, 0)
         xmin = max(xmin - pad, 0)
+
         zmax = min(zmax + pad, Z)
         ymax = min(ymax + pad, Y)
         xmax = min(xmax + pad, X)
 
-    vol_crop = vol[:, zmin:zmax, ymin:ymax, xmin:xmax]  # (C, Zc, Yc, Xc)
-    vol_t = torch.from_numpy(vol_crop).unsqueeze(0)      # (1, C, Zc, Yc, Xc)
+        #  check: if any dimension collapses or is too small,
+        #    fall back to the full volume
+        if (zmax <= zmin + 1) or (ymax <= ymin + 1) or (xmax <= xmin + 1):
+            zmin, zmax = 0, Z
+            ymin, ymax = 0, Y
+            xmin, xmax = 0, X
 
+    vol_crop = vol[:, zmin:zmax, ymin:ymax, xmin:xmax]  # (C, Zc, Yc, Xc)
+
+    vol_t = torch.from_numpy(vol_crop).unsqueeze(0)      # (1, C, Zc, Yc, Xc)
     vol_t = F.interpolate(
         vol_t,
         size=target_shape,
