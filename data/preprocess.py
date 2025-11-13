@@ -1,57 +1,322 @@
 import os
-import numpy as np
-import SimpleITK as sitk
-import torch
+import json
 from glob import glob
 
-# Global vars, used by train_multimodal.py
-DATA_ROOT = None
-patient_clin = {}
-patient_surv = {}
-fold_splits = {}
+import numpy as np
+import pandas as pd
+import SimpleITK as sitk
+import torch
+import torch.nn.functional as F
+
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+
+# --------- GLOBALS (used by dataset.py) ---------
+DATA_ROOT = None          # e.g. "/content/drive/MyDrive/Multimodal-Quiz"
+patient_clin = {}         # pid -> np.array(features)
+patient_surv = {}         # pid -> (time, event)
+fold_splits = {}          # fold_id -> {"train": [pids], "val": [pids]}
+clin_dim = None           # feature dimension
 
 
-def load_volume(path):
-    vol = sitk.ReadImage(path)
-    arr = sitk.GetArrayFromImage(vol)
+# --------- MRI / MASK LOADING & PREPROCESSING ---------
+
+def _load_mha(path: str) -> np.ndarray:
+    img = sitk.ReadImage(path)
+    arr = sitk.GetArrayFromImage(img)  # (Z, Y, X)
     return arr.astype(np.float32)
 
 
-def load_patient_mri(pid, root):
-    patient_dir = os.path.join(root, "radiology", "mpMRI", pid)
+def load_patient_mri(pid: str, data_root: str) -> np.ndarray:
+    """
+    Expected structure:
+        data_root/radiology/mpMRI/<pid>/*.mha
+    Returns np array (C, Z, Y, X) where C=3 (first 3 mha files sorted).
+    """
+    pid = str(pid)
+    patient_dir = os.path.join(data_root, "radiology", "mpMRI", pid)
     paths = sorted(glob(os.path.join(patient_dir, "*.mha")))
-    vols = [load_volume(p) for p in paths]
-    return np.stack(vols, axis=0)
+    if len(paths) < 3:
+        raise FileNotFoundError(f"Expected at least 3 .mha files in {patient_dir}, found {len(paths)}")
+
+    vols = []
+    ref_shape = None
+    for p in paths[:3]:
+        arr = _load_mha(p)  # (Z, Y, X)
+        if ref_shape is None:
+            ref_shape = arr.shape
+        else:
+            if arr.shape != ref_shape:
+                # simple crop to match reference if needed
+                z, y, x = arr.shape
+                rz, ry, rx = ref_shape
+                arr = arr[:rz, :ry, :rx]
+        vols.append(arr)
+
+    vol = np.stack(vols, axis=0)  # (C, Z, Y, X)
+    return vol
 
 
-def load_patient_mask(pid, root):
-    mask_dir = os.path.join(root, "radiology", "prostate_mask_t2w")
+def load_patient_mask(pid: str, data_root: str) -> np.ndarray:
+    """
+    Expected structure:
+        data_root/radiology/prostate_mask_t2w/<pid>_0001_mask.mha
+    Returns np array (Z, Y, X)
+    """
+    pid = str(pid)
+    mask_dir = os.path.join(data_root, "radiology", "prostate_mask_t2w")
     path = os.path.join(mask_dir, f"{pid}_0001_mask.mha")
-    return load_volume(path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Mask not found: {path}")
+    return _load_mha(path)  # (Z, Y, X)
 
 
-def preprocess_mri(vol, mask, pad=20):
+def preprocess_mri(
+    vol: np.ndarray,
+    mask: np.ndarray,
+    target_shape=(96, 128, 128),
+    pad: int = 20,
+) -> torch.Tensor:
     """
-    vol: (3, Z, Y, X)
+    vol:  (C, Z, Y, X)
     mask: (Z, Y, X)
+    Returns tensor (C, Zt, Yt, Xt) normalized per channel.
     """
-    mask_idx = np.argwhere(mask > 0)
-    zmin, ymin, xmin = mask_idx.min(axis=0)
-    zmax, ymax, xmax = mask_idx.max(axis=0)
+    assert vol.ndim == 4, vol.shape
+    assert mask.ndim == 3, mask.shape
 
-    zmin, ymin, xmin = max(zmin - pad, 0), max(ymin - pad, 0), max(xmin - pad, 0)
-    zmax += pad
-    ymax += pad
-    xmax += pad
+    C, Z, Y, X = vol.shape
 
-    vol_crop = vol[:, zmin:zmax, ymin:ymax, xmin:xmax]
-    vol_crop = (vol_crop - vol_crop.mean()) / (vol_crop.std() + 1e-8)
+    nz = np.where(mask > 0)
+    if len(nz[0]) == 0:
+        # fallback: full volume
+        zmin, zmax = 0, Z
+        ymin, ymax = 0, Y
+        xmin, xmax = 0, X
+    else:
+        zmin, zmax = nz[0].min(), nz[0].max()
+        ymin, ymax = nz[1].min(), nz[1].max()
+        xmin, xmax = nz[2].min(), nz[2].max()
 
-    vol_tensor = torch.tensor(vol_crop, dtype=torch.float32)
-    vol_tensor = torch.nn.functional.interpolate(
-        vol_tensor.unsqueeze(0),
-        size=(96, 128, 128),
+        zmin = max(zmin - pad, 0)
+        ymin = max(ymin - pad, 0)
+        xmin = max(xmin - pad, 0)
+
+        zmax = min(zmax + pad, Z)
+        ymax = min(ymax + pad, Y)
+        xmax = min(xmax + pad, X)
+
+    vol_crop = vol[:, zmin:zmax, ymin:ymax, xmin:xmax]  # (C, Zc, Yc, Xc)
+
+    vol_t = torch.from_numpy(vol_crop).float().unsqueeze(0)  # (1, C, Zc, Yc, Xc)
+    vol_t = F.interpolate(
+        vol_t,
+        size=target_shape,
         mode="trilinear",
-        align_corners=False
+        align_corners=False,
+    )  # (1, C, Zt, Yt, Xt)
+    vol_t = vol_t.squeeze(0)  # (C, Zt, Yt, Xt)
+
+    # per-channel z-score (ignoring zeros)
+    for c in range(vol_t.shape[0]):
+        ch = vol_t[c]
+        nzch = ch[ch != 0]
+        if nzch.numel() > 20:
+            mean = nzch.mean()
+            std = nzch.std()
+            if std > 0:
+                vol_t[c] = (ch - mean) / std
+
+    return vol_t
+
+
+# --------- CLINICAL + SURVIVAL LOADING ---------
+
+def load_clinical_table(clinical_dir: str) -> pd.DataFrame:
+    """
+    Load all JSON clinical files into a DataFrame with:
+      - patient_id
+      - time
+      - event
+      - other clinical columns
+    """
+    records = []
+    time_key = "time_to_follow-up/BCR"
+    event_key = "BCR"
+
+    for path in glob(os.path.join(clinical_dir, "*.json")):
+        with open(path, "r") as f:
+            d = json.load(f)
+
+        pid = os.path.splitext(os.path.basename(path))[0]
+
+        if time_key not in d or event_key not in d:
+            raise KeyError(f"Missing {time_key} or {event_key} in {path}")
+
+        # time
+        t_raw = d[time_key]
+        try:
+            time_val = float(t_raw)
+        except Exception:
+            time_val = float(str(t_raw).replace(",", "."))
+
+        # event
+        e_raw = d[event_key]
+        try:
+            event_val = int(round(float(e_raw)))
+        except Exception:
+            raise ValueError(f"Cannot parse BCR value '{e_raw}' in {path}")
+
+        rec = {
+            "patient_id": pid,
+            "time": time_val,
+            "event": event_val,
+        }
+
+        # add remaining clinical fields
+        for k, v in d.items():
+            if k not in [time_key, event_key]:
+                rec[k] = v
+
+        records.append(rec)
+
+    df = pd.DataFrame(records)
+    return df
+
+
+def build_patient_surv_and_clin(
+    clinical_df: pd.DataFrame,
+    numeric_features=None,
+    categorical_features=None,
+):
+    """
+    Build:
+      - patient_surv: pid -> (time, event)
+      - patient_clin: pid -> np.array(features)
+      - preprocessor (sklearn)
+      - clin_dim
+    """
+    df = clinical_df.copy()
+    df["patient_id"] = df["patient_id"].astype(str)
+
+    # default sets based on your JSON keys
+    if numeric_features is None:
+        numeric_features = [
+            "age_at_prostatectomy",
+            "primary_gleason",
+            "secondary_gleason",
+            "ISUP",
+            "pre_operative_PSA",
+            "positive_surgical_margins",
+            "tertiary_gleason",
+            "BCR_PSA",
+        ]
+    if categorical_features is None:
+        categorical_features = [
+            "pT_stage",
+            "positive_lymph_nodes",
+            "capsular_penetration",
+            "invasion_seminal_vesicles",
+            "lymphovascular_invasion",
+            "earlier_therapy",
+        ]
+
+    # keep only existing columns
+    numeric_features = [c for c in numeric_features if c in df.columns]
+    categorical_features = [c for c in categorical_features if c in df.columns]
+
+    numeric_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ]
     )
-    return vol_tensor.squeeze(0)
+    categorical_transformer = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, numeric_features),
+            ("cat", categorical_transformer, categorical_features),
+        ]
+    )
+
+    X = df[numeric_features + categorical_features]
+    X_proc = preprocessor.fit_transform(X)
+    X_proc = X_proc.toarray() if hasattr(X_proc, "toarray") else X_proc
+
+    patient_surv = {}
+    patient_clin = {}
+
+    for pid, row, x in zip(df["patient_id"], df.itertuples(index=False), X_proc):
+        patient_surv[pid] = (row.time, row.event)
+        patient_clin[pid] = np.asarray(x, dtype=np.float32)
+
+    clin_dim = X_proc.shape[1]
+    return patient_surv, patient_clin, preprocessor, clin_dim
+
+
+def load_fold_splits(split_csv_path: str):
+    """
+    Read data_split_5fold.csv with columns:
+      - patient_id
+      - fold
+    """
+    df_split = pd.read_csv(split_csv_path)
+    assert {"patient_id", "fold"}.issubset(df_split.columns)
+    df_split["patient_id"] = df_split["patient_id"].astype(str)
+
+    folds = {}
+    for f in sorted(df_split["fold"].unique()):
+        val_ids = df_split[df_split["fold"] == f]["patient_id"].tolist()
+        train_ids = df_split[df_split["fold"] != f]["patient_id"].tolist()
+        folds[int(f)] = {"train": train_ids, "val": val_ids}
+    return folds
+
+
+def init_data(data_root: str):
+    """
+    Called once from train_multimodal.py to populate globals:
+      - DATA_ROOT
+      - patient_clin
+      - patient_surv
+      - fold_splits
+      - clin_dim
+    """
+    global DATA_ROOT, patient_clin, patient_surv, fold_splits, clin_dim
+
+    DATA_ROOT = data_root
+
+    clinical_dir = os.path.join(DATA_ROOT, "clinical_data")
+    split_csv = os.path.join(DATA_ROOT, "data_split_5fold.csv")
+
+    print("Initializing data from:")
+    print("  clinical_dir:", clinical_dir)
+    print("  split_csv   :", split_csv)
+
+    clinical_df = load_clinical_table(clinical_dir)
+    print("  clinical_df shape:", clinical_df.shape)
+
+    patient_surv, patient_clin, preproc, clin_dim = build_patient_surv_and_clin(clinical_df)
+    print(f"  patients with clinical+survival: {len(patient_surv)}")
+    print(f"  clinical feature dim: {clin_dim}")
+
+    fold_splits = load_fold_splits(split_csv)
+    for f, v in fold_splits.items():
+        train_ids = v["train"]
+        val_ids = v["val"]
+        e_train = sum(patient_surv[pid][1] for pid in train_ids if pid in patient_surv)
+        e_val = sum(patient_surv[pid][1] for pid in val_ids if pid in patient_surv)
+        print(f"  Fold {f}: train N={len(train_ids)}, events={e_train}, val N={len(val_ids)}, events={e_val}")
+
+    # assign to globals
+    globals()["patient_surv"] = patient_surv
+    globals()["patient_clin"] = patient_clin
+    globals()["fold_splits"] = fold_splits
+    globals()["clin_dim"] = clin_dim
