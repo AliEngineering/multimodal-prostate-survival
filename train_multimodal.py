@@ -6,8 +6,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from data.dataset import ProstateMultimodalDataset, get_datasets_for_fold
-from data.preprocess import init_data, patient_clin, clin_dim
+from data.dataset import get_datasets_for_fold
+from data.preprocess import init_data, clin_dim
 from utils.survival_loss import cox_ph_loss
 from utils.metrics import concordance_index
 from utils.wandb_utils import setup_wandb, log_metrics, finish_wandb
@@ -19,12 +19,18 @@ def get_dataloaders_for_fold(fold_id, batch_size, device, pad):
     pin = (device.type == "cuda")
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=0, pin_memory=pin
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=pin,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=0, pin_memory=pin
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=pin,
     )
     return train_loader, val_loader
 
@@ -45,19 +51,18 @@ def train_one_fold(fold_id, args, device):
         fold_id, args.batch_size, device, args.pad
     )
 
-    # clinical feature dimension from global clin_dim
     cdim = clin_dim
     print(f"Clinical feature dim: {cdim}")
 
     model = MultimodalSurvNet(
         clin_dim=cdim,
-        freeze_mri=args.freeze_mri
+        freeze_mri=args.freeze_mri,
     ).to(device)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=args.lr,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
     )
 
     n_train, e_train = count_events(train_loader)
@@ -126,7 +131,6 @@ def train_one_fold(fold_id, args, device):
         if c_index > best_cindex:
             best_cindex = c_index
             best_state = model.state_dict()
-
             out_dir = os.path.join("outputs", "models")
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, f"multimodal_survnet_fold{fold_id}.pth")
@@ -138,7 +142,7 @@ def train_one_fold(fold_id, args, device):
 
 
 def train_all_folds(args):
-    # Initialize all global data structures (clinical, folds, etc.)
+    # VERY IMPORTANT: populate globals before anything else
     init_data(args.data_root)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -153,7 +157,6 @@ def train_all_folds(args):
     print("\n===== FINAL 5-FOLD RESULTS =====")
     for f, c in results.items():
         print(f"Fold {f}: {c:.4f}")
-
     print(
         f"Mean: {np.mean(list(results.values())):.4f} ± "
         f"{np.std(list(results.values())):.4f}"
@@ -168,8 +171,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--pad", type=int, default=20)
-    parser.add_argument("--freeze_mri", action='store_true')
-    parser.add_argument("--wandb", action='store_true')
+    parser.add_argument("--freeze_mri", action="store_true")
+    parser.add_argument("--wandb", action="store_true")
 
     args = parser.parse_args()
     train_all_folds(args)
