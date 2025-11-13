@@ -29,45 +29,74 @@ def _load_mha(path: str) -> np.ndarray:
     return arr.astype(np.float32)
 
 
-def load_patient_mri(pid: str, data_root: str) -> np.ndarray:
+def load_patient_mri(pid, data_root):
     """
-    data_root/radiology/mpMRI/<pid>/*.mha
-    Returns (C, Z, Y, X) for 3 modalities.
+    Loads T2, ADC, B1500 for a patient, resamples each to a shared reference
+    shape (T2 shape), and returns np array (3, Z, Y, X).
     """
-    pid = str(pid)
-    patient_dir = os.path.join(data_root, "radiology", "mpMRI", pid)
-    paths = sorted(glob(os.path.join(patient_dir, "*.mha")))
-    if len(paths) < 3:
-        raise FileNotFoundError(f"Expected at least 3 .mha in {patient_dir}, found {len(paths)}")
+    import SimpleITK as sitk
+    import numpy as np
+    import os
 
-    vols = []
-    ref_shape = None
-    for p in paths[:3]:
-        arr = _load_mha(p)  # (Z, Y, X)
-        if ref_shape is None:
-            ref_shape = arr.shape
-        else:
-            if arr.shape != ref_shape:
-                rz, ry, rx = ref_shape
-                z, y, x = arr.shape
-                arr = arr[:rz, :ry, :rx]
-        vols.append(arr)
+    t2_path  = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0000.mha")
+    adc_path = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0001.mha")
+    b15_path = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0002.mha")
 
-    vol = np.stack(vols, axis=0)  # (C, Z, Y, X)
+    paths = [t2_path, adc_path, b15_path]
+
+    imgs = [sitk.ReadImage(p) for p in paths]
+
+    # --- use T2 as reference space ---
+    ref = imgs[0]
+    ref_size   = ref.GetSize()
+    ref_spacing = ref.GetSpacing()
+    ref_origin  = ref.GetOrigin()
+    ref_dir     = ref.GetDirection()
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetSize(ref_size)
+    resampler.SetOutputSpacing(ref_spacing)
+    resampler.SetOutputOrigin(ref_origin)
+    resampler.SetOutputDirection(ref_dir)
+    resampler.SetInterpolator(sitk.sitkLinear)
+
+    resampled = []
+    for img in imgs:
+        resampled_img = resampler.Execute(img)
+        arr = sitk.GetArrayFromImage(resampled_img)  # (Z, Y, X)
+        resampled.append(arr)
+
+    # Stack → shape (3, Z, Y, X)
+    vol = np.stack(resampled, axis=0).astype(np.float32)
     return vol
 
 
-def load_patient_mask(pid: str, data_root: str) -> np.ndarray:
+def load_patient_mask(pid, data_root):
     """
-    data_root/radiology/prostate_mask_t2w/<pid>_0001_mask.mha
-    Returns (Z, Y, X)
+    Load prostate mask and resample to T2 reference shape.
     """
-    pid = str(pid)
-    mask_dir = os.path.join(data_root, "radiology", "prostate_mask_t2w")
-    path = os.path.join(mask_dir, f"{pid}_0001_mask.mha")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Mask not found: {path}")
-    return _load_mha(path)
+    import SimpleITK as sitk
+    import numpy as np
+    import os
+
+    mask_path = os.path.join(data_root, "radiology/prostate_mask_t2w", f"{pid}_0001_mask.mha")
+
+    # load mask + corresponding T2 image to match shape
+    mask_img = sitk.ReadImage(mask_path)
+    t2_path = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0000.mha")
+    t2_img = sitk.ReadImage(t2_path)
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetSize(t2_img.GetSize())
+    resampler.SetOutputSpacing(t2_img.GetSpacing())
+    resampler.SetOutputOrigin(t2_img.GetOrigin())
+    resampler.SetOutputDirection(t2_img.GetDirection())
+    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+
+    mask_resampled = resampler.Execute(mask_img)
+    mask_arr = sitk.GetArrayFromImage(mask_resampled).astype(np.uint8)  # (Z, Y, X)
+
+    return mask_arr
 
 
 def preprocess_mri(vol: np.ndarray, mask: np.ndarray,
