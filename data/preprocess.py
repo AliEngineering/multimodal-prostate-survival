@@ -13,7 +13,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 
-# --------- GLOBALS (used by dataset.py) ---------
+# --------- GLOBALS (used by dataset & trainer) ---------
 DATA_ROOT = None          # e.g. "/content/drive/MyDrive/Multimodal-Quiz"
 patient_clin = {}         # pid -> np.array(features)
 patient_surv = {}         # pid -> (time, event)
@@ -21,7 +21,7 @@ fold_splits = {}          # fold_id -> {"train": [pids], "val": [pids]}
 clin_dim = None           # feature dimension
 
 
-# --------- MRI / MASK LOADING & PREPROCESSING ---------
+# ========= MRI / MASK LOADING =========
 
 def _load_mha(path: str) -> np.ndarray:
     img = sitk.ReadImage(path)
@@ -31,15 +31,14 @@ def _load_mha(path: str) -> np.ndarray:
 
 def load_patient_mri(pid: str, data_root: str) -> np.ndarray:
     """
-    Expected structure:
-        data_root/radiology/mpMRI/<pid>/*.mha
-    Returns np array (C, Z, Y, X) where C=3 (first 3 mha files sorted).
+    data_root/radiology/mpMRI/<pid>/*.mha
+    Returns (C, Z, Y, X) for 3 modalities.
     """
     pid = str(pid)
     patient_dir = os.path.join(data_root, "radiology", "mpMRI", pid)
     paths = sorted(glob(os.path.join(patient_dir, "*.mha")))
     if len(paths) < 3:
-        raise FileNotFoundError(f"Expected at least 3 .mha files in {patient_dir}, found {len(paths)}")
+        raise FileNotFoundError(f"Expected at least 3 .mha in {patient_dir}, found {len(paths)}")
 
     vols = []
     ref_shape = None
@@ -49,9 +48,8 @@ def load_patient_mri(pid: str, data_root: str) -> np.ndarray:
             ref_shape = arr.shape
         else:
             if arr.shape != ref_shape:
-                # simple crop to match reference if needed
-                z, y, x = arr.shape
                 rz, ry, rx = ref_shape
+                z, y, x = arr.shape
                 arr = arr[:rz, :ry, :rx]
         vols.append(arr)
 
@@ -61,37 +59,27 @@ def load_patient_mri(pid: str, data_root: str) -> np.ndarray:
 
 def load_patient_mask(pid: str, data_root: str) -> np.ndarray:
     """
-    Expected structure:
-        data_root/radiology/prostate_mask_t2w/<pid>_0001_mask.mha
-    Returns np array (Z, Y, X)
+    data_root/radiology/prostate_mask_t2w/<pid>_0001_mask.mha
+    Returns (Z, Y, X)
     """
     pid = str(pid)
     mask_dir = os.path.join(data_root, "radiology", "prostate_mask_t2w")
     path = os.path.join(mask_dir, f"{pid}_0001_mask.mha")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Mask not found: {path}")
-    return _load_mha(path)  # (Z, Y, X)
+    return _load_mha(path)
 
 
-def preprocess_mri(
-    vol: np.ndarray,
-    mask: np.ndarray,
-    target_shape=(96, 128, 128),
-    pad: int = 20,
-) -> torch.Tensor:
+def preprocess_mri(vol: np.ndarray, mask: np.ndarray,
+                   target_shape=(96, 128, 128), pad: int = 20) -> torch.Tensor:
     """
     vol:  (C, Z, Y, X)
     mask: (Z, Y, X)
-    Returns tensor (C, Zt, Yt, Xt) normalized per channel.
+    Returns tensor (C, Zt, Yt, Xt)
     """
-    assert vol.ndim == 4, vol.shape
-    assert mask.ndim == 3, mask.shape
-
     C, Z, Y, X = vol.shape
-
     nz = np.where(mask > 0)
     if len(nz[0]) == 0:
-        # fallback: full volume
         zmin, zmax = 0, Z
         ymin, ymax = 0, Y
         xmin, xmax = 0, X
@@ -103,23 +91,21 @@ def preprocess_mri(
         zmin = max(zmin - pad, 0)
         ymin = max(ymin - pad, 0)
         xmin = max(xmin - pad, 0)
-
         zmax = min(zmax + pad, Z)
         ymax = min(ymax + pad, Y)
         xmax = min(xmax + pad, X)
 
     vol_crop = vol[:, zmin:zmax, ymin:ymax, xmin:xmax]  # (C, Zc, Yc, Xc)
+    vol_t = torch.from_numpy(vol_crop).unsqueeze(0)      # (1, C, Zc, Yc, Xc)
 
-    vol_t = torch.from_numpy(vol_crop).float().unsqueeze(0)  # (1, C, Zc, Yc, Xc)
     vol_t = F.interpolate(
         vol_t,
         size=target_shape,
         mode="trilinear",
         align_corners=False,
-    )  # (1, C, Zt, Yt, Xt)
-    vol_t = vol_t.squeeze(0)  # (C, Zt, Yt, Xt)
+    ).squeeze(0)                                        # (C, Zt, Yt, Xt)
 
-    # per-channel z-score (ignoring zeros)
+    # per-channel z-score ignoring zeros
     for c in range(vol_t.shape[0]):
         ch = vol_t[c]
         nzch = ch[ch != 0]
@@ -128,19 +114,15 @@ def preprocess_mri(
             std = nzch.std()
             if std > 0:
                 vol_t[c] = (ch - mean) / std
+    return vol_t.float()
 
-    return vol_t
 
-
-# --------- CLINICAL + SURVIVAL LOADING ---------
+# ========= CLINICAL / SURVIVAL =========
 
 def load_clinical_table(clinical_dir: str) -> pd.DataFrame:
     """
-    Load all JSON clinical files into a DataFrame with:
-      - patient_id
-      - time
-      - event
-      - other clinical columns
+    Load each <pid>.json into a row with:
+      patient_id, time, event, plus extra clinical fields.
     """
     records = []
     time_key = "time_to_follow-up/BCR"
@@ -155,35 +137,25 @@ def load_clinical_table(clinical_dir: str) -> pd.DataFrame:
         if time_key not in d or event_key not in d:
             raise KeyError(f"Missing {time_key} or {event_key} in {path}")
 
-        # time
         t_raw = d[time_key]
         try:
             time_val = float(t_raw)
         except Exception:
             time_val = float(str(t_raw).replace(",", "."))
 
-        # event
         e_raw = d[event_key]
         try:
             event_val = int(round(float(e_raw)))
         except Exception:
             raise ValueError(f"Cannot parse BCR value '{e_raw}' in {path}")
 
-        rec = {
-            "patient_id": pid,
-            "time": time_val,
-            "event": event_val,
-        }
-
-        # add remaining clinical fields
+        rec = {"patient_id": pid, "time": time_val, "event": event_val}
         for k, v in d.items():
             if k not in [time_key, event_key]:
                 rec[k] = v
-
         records.append(rec)
 
-    df = pd.DataFrame(records)
-    return df
+    return pd.DataFrame(records)
 
 
 def build_patient_surv_and_clin(
@@ -191,17 +163,9 @@ def build_patient_surv_and_clin(
     numeric_features=None,
     categorical_features=None,
 ):
-    """
-    Build:
-      - patient_surv: pid -> (time, event)
-      - patient_clin: pid -> np.array(features)
-      - preprocessor (sklearn)
-      - clin_dim
-    """
     df = clinical_df.copy()
     df["patient_id"] = df["patient_id"].astype(str)
 
-    # default sets based on your JSON keys
     if numeric_features is None:
         numeric_features = [
             "age_at_prostatectomy",
@@ -223,17 +187,16 @@ def build_patient_surv_and_clin(
             "earlier_therapy",
         ]
 
-    # keep only existing columns
     numeric_features = [c for c in numeric_features if c in df.columns]
     categorical_features = [c for c in categorical_features if c in df.columns]
 
-    numeric_transformer = Pipeline(
+    num_tf = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
         ]
     )
-    categorical_transformer = Pipeline(
+    cat_tf = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
             ("onehot", OneHotEncoder(handle_unknown="ignore")),
@@ -242,18 +205,18 @@ def build_patient_surv_and_clin(
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num", numeric_transformer, numeric_features),
-            ("cat", categorical_transformer, categorical_features),
+            ("num", num_tf, numeric_features),
+            ("cat", cat_tf, categorical_features),
         ]
     )
 
     X = df[numeric_features + categorical_features]
     X_proc = preprocessor.fit_transform(X)
-    X_proc = X_proc.toarray() if hasattr(X_proc, "toarray") else X_proc
+    if hasattr(X_proc, "toarray"):
+        X_proc = X_proc.toarray()
 
     patient_surv = {}
     patient_clin = {}
-
     for pid, row, x in zip(df["patient_id"], df.itertuples(index=False), X_proc):
         patient_surv[pid] = (row.time, row.event)
         patient_clin[pid] = np.asarray(x, dtype=np.float32)
@@ -263,11 +226,6 @@ def build_patient_surv_and_clin(
 
 
 def load_fold_splits(split_csv_path: str):
-    """
-    Read data_split_5fold.csv with columns:
-      - patient_id
-      - fold
-    """
     df_split = pd.read_csv(split_csv_path)
     assert {"patient_id", "fold"}.issubset(df_split.columns)
     df_split["patient_id"] = df_split["patient_id"].astype(str)
@@ -282,21 +240,16 @@ def load_fold_splits(split_csv_path: str):
 
 def init_data(data_root: str):
     """
-    Called once from train_multimodal.py to populate globals:
-      - DATA_ROOT
-      - patient_clin
-      - patient_surv
-      - fold_splits
-      - clin_dim
+    Populate global:
+      DATA_ROOT, patient_clin, patient_surv, fold_splits, clin_dim
     """
     global DATA_ROOT, patient_clin, patient_surv, fold_splits, clin_dim
 
     DATA_ROOT = data_root
-
     clinical_dir = os.path.join(DATA_ROOT, "clinical_data")
     split_csv = os.path.join(DATA_ROOT, "data_split_5fold.csv")
 
-    print("Initializing data from:")
+    print("=== init_data ===")
     print("  clinical_dir:", clinical_dir)
     print("  split_csv   :", split_csv)
 
@@ -304,18 +257,16 @@ def init_data(data_root: str):
     print("  clinical_df shape:", clinical_df.shape)
 
     patient_surv, patient_clin, preproc, clin_dim = build_patient_surv_and_clin(clinical_df)
-    print(f"  patients with clinical+survival: {len(patient_surv)}")
+    print(f"  N patients: {len(patient_surv)}")
     print(f"  clinical feature dim: {clin_dim}")
 
     fold_splits = load_fold_splits(split_csv)
     for f, v in fold_splits.items():
-        train_ids = v["train"]
-        val_ids = v["val"]
-        e_train = sum(patient_surv[pid][1] for pid in train_ids if pid in patient_surv)
-        e_val = sum(patient_surv[pid][1] for pid in val_ids if pid in patient_surv)
-        print(f"  Fold {f}: train N={len(train_ids)}, events={e_train}, val N={len(val_ids)}, events={e_val}")
+        tr, va = v["train"], v["val"]
+        e_tr = sum(patient_surv[p][1] for p in tr if p in patient_surv)
+        e_va = sum(patient_surv[p][1] for p in va if p in patient_surv)
+        print(f"  Fold {f}: train N={len(tr)}, events={e_tr}, val N={len(va)}, events={e_va}")
 
-    # assign to globals
     globals()["patient_surv"] = patient_surv
     globals()["patient_clin"] = patient_clin
     globals()["fold_splits"] = fold_splits
