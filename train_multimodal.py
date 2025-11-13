@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from data.dataset import get_datasets_for_fold
-from data.preprocess import init_data, clin_dim
+from data import preprocess  # <-- use module
 from utils.survival_loss import cox_ph_loss
 from utils.metrics import concordance_index
 from utils.wandb_utils import setup_wandb, log_metrics, finish_wandb
@@ -51,7 +51,7 @@ def train_one_fold(fold_id, args, device):
         fold_id, args.batch_size, device, args.pad
     )
 
-    cdim = clin_dim
+    cdim = preprocess.clin_dim
     print(f"Clinical feature dim: {cdim}")
 
     model = MultimodalSurvNet(
@@ -143,7 +143,7 @@ def train_one_fold(fold_id, args, device):
 
 def train_all_folds(args):
     # VERY IMPORTANT: populate globals before anything else
-    init_data(args.data_root)
+    preprocess.init_data(args.data_root)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
