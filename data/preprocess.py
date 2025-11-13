@@ -166,6 +166,7 @@ def build_patient_surv_and_clin(
     df = clinical_df.copy()
     df["patient_id"] = df["patient_id"].astype(str)
 
+    # ---- Define feature sets (as before) ----
     if numeric_features is None:
         numeric_features = [
             "age_at_prostatectomy",
@@ -187,16 +188,28 @@ def build_patient_surv_and_clin(
             "earlier_therapy",
         ]
 
+    # keep only columns that exist
     numeric_features = [c for c in numeric_features if c in df.columns]
     categorical_features = [c for c in categorical_features if c in df.columns]
 
-    num_tf = Pipeline(
+    # CRITICAL: force numeric features to be numeric (non-numeric → NaN)
+    for col in numeric_features:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Also normalize categorical: always strings
+    for col in categorical_features:
+        df[col] = df[col].astype(str).replace({"nan": "missing", "None": "missing"})
+        df[col] = df[col].replace({"": "missing", " ": "missing"})
+
+    # ---- Preprocessor as before ----
+    numeric_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
         ]
     )
-    cat_tf = Pipeline(
+
+    categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
             ("onehot", OneHotEncoder(handle_unknown="ignore")),
@@ -205,8 +218,8 @@ def build_patient_surv_and_clin(
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num", num_tf, numeric_features),
-            ("cat", cat_tf, categorical_features),
+            ("num", numeric_transformer, numeric_features),
+            ("cat", categorical_transformer, categorical_features),
         ]
     )
 
@@ -217,6 +230,7 @@ def build_patient_surv_and_clin(
 
     patient_surv = {}
     patient_clin = {}
+
     for pid, row, x in zip(df["patient_id"], df.itertuples(index=False), X_proc):
         patient_surv[pid] = (row.time, row.event)
         patient_clin[pid] = np.asarray(x, dtype=np.float32)
