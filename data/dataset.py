@@ -46,13 +46,18 @@ class ProstateMultimodalDataset(Dataset):
         clin_vec = preprocess.patient_clin[pid]
         time, event = preprocess.patient_surv[pid]
 
+        clin_tensor = torch.tensor(clin_vec, dtype=torch.float32)
+
         return {
             "pid": pid,
             "mri": vol_pp,
-            "clinical": torch.tensor(clin_vec, dtype=torch.float32),
+            # both keys so whichever the training code uses will work
+            "clin": clin_tensor,
+            "clinical": clin_tensor,
             "time": torch.tensor(time, dtype=torch.float32),
             "event": torch.tensor(event, dtype=torch.float32),
         }
+
 
 
 def get_datasets_for_fold(fold_id: int, pad: int = 20, target_shape=(96, 128, 128)):
