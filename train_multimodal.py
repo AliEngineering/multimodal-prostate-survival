@@ -3,18 +3,19 @@ import argparse
 import numpy as np
 import torch
 
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+
 from data.dataset import ProstateMultimodalDataset, get_datasets_for_fold
+from data.preprocess import init_data, patient_clin, clin_dim
 from utils.survival_loss import cox_ph_loss
 from utils.metrics import concordance_index
 from utils.wandb_utils import setup_wandb, log_metrics, finish_wandb
 from models.multimodal_survnet import MultimodalSurvNet
 
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
-
-def get_dataloaders_for_fold(fold_id, batch_size, device):
-    train_ds, val_ds = get_datasets_for_fold(fold_id)
+def get_dataloaders_for_fold(fold_id, batch_size, device, pad):
+    train_ds, val_ds = get_datasets_for_fold(fold_id, pad=pad)
     pin = (device.type == "cuda")
 
     train_loader = DataLoader(
@@ -40,20 +41,29 @@ def count_events(loader):
 def train_one_fold(fold_id, args, device):
     print(f"\n========== Fold {fold_id} ==========")
 
-    train_loader, val_loader = get_dataloaders_for_fold(fold_id, args.batch_size, device)
+    train_loader, val_loader = get_dataloaders_for_fold(
+        fold_id, args.batch_size, device, args.pad
+    )
 
-    # get clinical feature dimension
-    example_pid = next(iter(train_loader.dataset.patient_clin.keys()))
-    clin_dim = train_loader.dataset.patient_clin[example_pid].shape[0]
+    # clinical feature dimension from global clin_dim
+    cdim = clin_dim
+    print(f"Clinical feature dim: {cdim}")
 
-    model = MultimodalSurvNet(clin_dim=clin_dim, freeze_mri=args.freeze_mri).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    model = MultimodalSurvNet(
+        clin_dim=cdim,
+        freeze_mri=args.freeze_mri
+    ).to(device)
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay
+    )
 
     n_train, e_train = count_events(train_loader)
     n_val, e_val = count_events(val_loader)
     print(f"Train N={n_train}, events={e_train}, Val N={n_val}, events={e_val}")
 
-    # wandb run
     run = setup_wandb(fold_id, args)
 
     best_cindex = -1.0
@@ -78,7 +88,7 @@ def train_one_fold(fold_id, args, device):
 
             train_losses.append(loss.item())
 
-        # -------- VALIDATION --------
+        # -------- VAL --------
         model.eval()
         val_losses = []
         all_risk, all_time, all_event = [], [], []
@@ -103,15 +113,16 @@ def train_one_fold(fold_id, args, device):
         all_event = torch.cat(all_event)
 
         c_index = concordance_index(all_risk, all_time, all_event)
+        mean_train = float(np.mean(train_losses))
+        mean_val = float(np.mean(val_losses))
 
-        mean_train = np.mean(train_losses)
-        mean_val = np.mean(val_losses)
-
-        print(f"[Fold {fold_id}] Epoch {epoch} | Train {mean_train:.4f} | Val {mean_val:.4f} | C-index {c_index:.4f}")
+        print(
+            f"[Fold {fold_id}] Epoch {epoch} | "
+            f"Train {mean_train:.4f} | Val {mean_val:.4f} | C-index {c_index:.4f}"
+        )
 
         log_metrics(epoch, mean_train, mean_val, c_index, fold_id)
 
-        # save best
         if c_index > best_cindex:
             best_cindex = c_index
             best_state = model.state_dict()
@@ -127,6 +138,9 @@ def train_one_fold(fold_id, args, device):
 
 
 def train_all_folds(args):
+    # Initialize all global data structures (clinical, folds, etc.)
+    init_data(args.data_root)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
@@ -140,7 +154,10 @@ def train_all_folds(args):
     for f, c in results.items():
         print(f"Fold {f}: {c:.4f}")
 
-    print(f"Mean: {np.mean(list(results.values())):.4f} ± {np.std(list(results.values())):.4f}")
+    print(
+        f"Mean: {np.mean(list(results.values())):.4f} ± "
+        f"{np.std(list(results.values())):.4f}"
+    )
 
 
 if __name__ == "__main__":
