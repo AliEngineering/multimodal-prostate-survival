@@ -1,21 +1,36 @@
-import os
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.preprocess import load_patient_mri, load_patient_mask, preprocess_mri
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
+from .preprocess import (
+    load_patient_mri,
+    load_patient_mask,
+    preprocess_mri,
+    DATA_ROOT,
+    patient_clin,
+    patient_surv,
+    fold_splits,
+)
 
 
 class ProstateMultimodalDataset(Dataset):
-    def __init__(self, patient_ids, patient_clin, patient_surv, data_root, pad=20):
-        self.patient_ids = patient_ids
-        self.patient_clin = patient_clin
-        self.patient_surv = patient_surv
-        self.data_root = data_root
+    """
+    Dataset returning:
+      {
+        "pid": str,
+        "mri": (C, Z, Y, X) tensor,
+        "clinical": (F,) tensor,
+        "time": scalar,
+        "event": scalar
+      }
+    """
+    def __init__(self, patient_ids, pad=20, target_shape=(96, 128, 128)):
+        self.patient_ids = [
+            str(pid)
+            for pid in patient_ids
+            if str(pid) in patient_surv and str(pid) in patient_clin
+        ]
         self.pad = pad
+        self.target_shape = target_shape
 
     def __len__(self):
         return len(self.patient_ids)
@@ -23,36 +38,33 @@ class ProstateMultimodalDataset(Dataset):
     def __getitem__(self, idx):
         pid = self.patient_ids[idx]
 
-        # MRI
-        vol = load_patient_mri(pid, self.data_root)
-        mask = load_patient_mask(pid, self.data_root)
-        mri_tensor = preprocess_mri(vol, mask, pad=self.pad)
+        vol = load_patient_mri(pid, DATA_ROOT)   # (C, Z, Y, X)
+        mask = load_patient_mask(pid, DATA_ROOT) # (Z, Y, X)
+        vol_pp = preprocess_mri(vol, mask, target_shape=self.target_shape, pad=self.pad)
 
-        # Clinical
-        clin = torch.tensor(self.patient_clin[pid], dtype=torch.float32)
-
-        # Survival
-        t, e = self.patient_surv[pid]
-        t = torch.tensor(t, dtype=torch.float32)
-        e = torch.tensor(e, dtype=torch.float32)
+        clin_vec = patient_clin[pid]
+        time, event = patient_surv[pid]
 
         return {
-            "mri": mri_tensor,
-            "clinical": clin,
-            "time": t,
-            "event": e
+            "pid": pid,
+            "mri": vol_pp.float(),
+            "clinical": torch.tensor(clin_vec, dtype=torch.float32),
+            "time": torch.tensor(time, dtype=torch.float32),
+            "event": torch.tensor(event, dtype=torch.float32),
         }
 
 
-def get_datasets_for_fold(fold_id):
+def get_datasets_for_fold(fold_id: int, pad: int = 20, target_shape=(96, 128, 128)):
     """
-    This expects fold_splits, patient_clin, and patient_surv to be loaded globally.
+    Uses global fold_splits from preprocess.init_data().
     """
-    from data.preprocess import patient_clin, patient_surv, fold_splits, DATA_ROOT
+    if fold_id not in fold_splits:
+        raise KeyError(f"Fold {fold_id} not found in fold_splits (did you call init_data?)")
 
     train_ids = fold_splits[fold_id]["train"]
     val_ids = fold_splits[fold_id]["val"]
 
-    train_ds = ProstateMultimodalDataset(train_ids, patient_clin, patient_surv, DATA_ROOT)
-    val_ds = ProstateMultimodalDataset(val_ids, patient_clin, patient_surv, DATA_ROOT)
+    train_ds = ProstateMultimodalDataset(train_ids, pad=pad, target_shape=target_shape)
+    val_ds = ProstateMultimodalDataset(val_ids, pad=pad, target_shape=target_shape)
+
     return train_ds, val_ds
