@@ -1,15 +1,7 @@
 import torch
 from torch.utils.data import Dataset
 
-from .preprocess import (
-    load_patient_mri,
-    load_patient_mask,
-    preprocess_mri,
-    DATA_ROOT,
-    patient_clin,
-    patient_surv,
-    fold_splits,
-)
+from . import preprocess  # import the module, not the variables
 
 
 class ProstateMultimodalDataset(Dataset):
@@ -31,7 +23,8 @@ class ProstateMultimodalDataset(Dataset):
         self.patient_ids = [
             str(pid)
             for pid in patient_ids
-            if str(pid) in patient_surv and str(pid) in patient_clin
+            if str(pid) in preprocess.patient_surv
+            and str(pid) in preprocess.patient_clin
         ]
 
     def __len__(self):
@@ -40,17 +33,18 @@ class ProstateMultimodalDataset(Dataset):
     def __getitem__(self, idx):
         pid = self.patient_ids[idx]
 
-        vol = load_patient_mri(pid, DATA_ROOT)   # (C, Z, Y, X)
-        mask = load_patient_mask(pid, DATA_ROOT) # (Z, Y, X)
-        vol_pp = preprocess_mri(
+        # use functions + globals from preprocess module
+        vol = preprocess.load_patient_mri(pid, preprocess.DATA_ROOT)   # (C, Z, Y, X)
+        mask = preprocess.load_patient_mask(pid, preprocess.DATA_ROOT) # (Z, Y, X)
+        vol_pp = preprocess.preprocess_mri(
             vol,
             mask,
             target_shape=self.target_shape,
             pad=self.pad,
         )  # tensor (C, Zt, Yt, Xt)
 
-        clin_vec = patient_clin[pid]
-        time, event = patient_surv[pid]
+        clin_vec = preprocess.patient_clin[pid]
+        time, event = preprocess.patient_surv[pid]
 
         return {
             "pid": pid,
@@ -63,13 +57,14 @@ class ProstateMultimodalDataset(Dataset):
 
 def get_datasets_for_fold(fold_id: int, pad: int = 20, target_shape=(96, 128, 128)):
     """
-    Uses global fold_splits, which must be populated by init_data(data_root).
+    Uses global preprocess.fold_splits, which must be populated by init_data(data_root).
     """
-    if fold_id not in fold_splits:
+    fs = preprocess.fold_splits
+    if fold_id not in fs:
         raise KeyError(f"Fold {fold_id} not found in fold_splits. Did you call init_data()?")
 
-    train_ids = fold_splits[fold_id]["train"]
-    val_ids = fold_splits[fold_id]["val"]
+    train_ids = fs[fold_id]["train"]
+    val_ids = fs[fold_id]["val"]
 
     train_ds = ProstateMultimodalDataset(train_ids, pad=pad, target_shape=target_shape)
     val_ds = ProstateMultimodalDataset(val_ids, pad=pad, target_shape=target_shape)
