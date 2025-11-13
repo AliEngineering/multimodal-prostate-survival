@@ -2,6 +2,8 @@ import os
 import argparse
 import numpy as np
 import torch
+import random
+import pandas as pd 
 
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -13,6 +15,13 @@ from utils.metrics import concordance_index
 from utils.wandb_utils import setup_wandb, log_metrics, finish_wandb
 from models.multimodal_survnet import MultimodalSurvNet
 
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def get_dataloaders_for_fold(fold_id, batch_size, device, pad):
     train_ds, val_ds = get_datasets_for_fold(fold_id, pad=pad)
@@ -73,6 +82,8 @@ def train_one_fold(fold_id, args, device):
 
     best_cindex = -1.0
     best_state = None
+    
+    all_val_preds = []  # store per-case predictions across epochs
 
     for epoch in range(1, args.epochs + 1):
         # -------- TRAIN --------
@@ -106,6 +117,21 @@ def train_one_fold(fold_id, args, device):
                 event = batch["event"].to(device)
 
                 risk = model(mri, clin)
+
+                pids = batch["pid"]  # list of strings
+
+                # store per-case predictions for this batch
+                for i in range(risk.shape[0]):
+                    all_val_preds.append({
+                        "fold": int(fold_id),
+                        "pid": str(pids[i]),
+                        "time": float(time[i].cpu().item()),
+                        "event": int(event[i].cpu().item()),
+                        "risk": float(risk[i].detach().cpu().item()),
+                        "epoch": int(epoch),
+                    })
+
+                
                 loss = cox_ph_loss(risk, time, event)
 
                 val_losses.append(loss.item())
@@ -136,6 +162,14 @@ def train_one_fold(fold_id, args, device):
             path = os.path.join(out_dir, f"multimodal_survnet_fold{fold_id}.pth")
             torch.save(best_state, path)
             print(f"Saved best model for fold {fold_id}: {c_index:.4f} to {path}")
+
+        # --- save per-case predictions for this fold ---
+    if len(all_val_preds) > 0:
+        preds_df = pd.DataFrame(all_val_preds)
+        os.makedirs(args.out_dir, exist_ok=True)
+        csv_path = os.path.join(args.out_dir, f"predictions_fold{fold_id}.csv")
+        preds_df.to_csv(csv_path, index=False)
+        print(f"Saved fold {fold_id} predictions to {csv_path}")
 
     finish_wandb(best_cindex)
     return best_cindex
@@ -173,6 +207,9 @@ if __name__ == "__main__":
     parser.add_argument("--pad", type=int, default=20)
     parser.add_argument("--freeze_mri", action="store_true")
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--out_dir", type=str, default="outputs")  
 
     args = parser.parse_args()
+    set_seed(42)
+    print("Args:", vars(args))
     train_all_folds(args)
