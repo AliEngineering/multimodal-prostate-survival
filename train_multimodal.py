@@ -157,13 +157,15 @@ def train_one_fold(fold_id, args, device):
         if c_index > best_cindex:
             best_cindex = c_index
             best_state = model.state_dict()
-            out_dir = os.path.join("outputs", "models")
-            os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, f"multimodal_survnet_fold{fold_id}.pth")
+
+            # save best model for this fold
+            model_dir = os.path.join(args.out_dir, "models")
+            os.makedirs(model_dir, exist_ok=True)
+            path = os.path.join(model_dir, f"multimodal_survnet_fold{fold_id}.pth")
             torch.save(best_state, path)
             print(f"Saved best model for fold {fold_id}: {c_index:.4f} to {path}")
 
-        # --- save per-case predictions for this fold ---
+    # --- save per-case predictions for this fold (after all epochs) ---
     if len(all_val_preds) > 0:
         preds_df = pd.DataFrame(all_val_preds)
         os.makedirs(args.out_dir, exist_ok=True)
