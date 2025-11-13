@@ -31,7 +31,7 @@ def _load_mha(path: str) -> np.ndarray:
 
 def load_patient_mri(pid, data_root):
     """
-    Load T2, ADC, HBV for a patient.
+    Load T2, ADC, HBV for a patient and resample ADC/HBV into T2 space.
 
     Directory structure:
       radiology/mpMRI/<pid>/
@@ -39,7 +39,7 @@ def load_patient_mri(pid, data_root):
         <pid>_0001_adc.mha
         <pid>_0001_hbv.mha
 
-    Returns np.ndarray of shape (3, Z, Y, X).
+    Returns np.ndarray of shape (3, Z, Y, X) in the T2 space.
     """
     import os
     import numpy as np
@@ -56,17 +56,42 @@ def load_patient_mri(pid, data_root):
         if not os.path.exists(p):
             raise FileNotFoundError(f"Missing MRI file for patient {pid}: {p}")
 
+    # --- read images ---
     t2_img  = sitk.ReadImage(t2_path)
     adc_img = sitk.ReadImage(adc_path)
     hbv_img = sitk.ReadImage(hbv_path)
 
-    t2_arr  = sitk.GetArrayFromImage(t2_img).astype(np.float32)   # (Z, Y, X)
-    adc_arr = sitk.GetArrayFromImage(adc_img).astype(np.float32)
-    hbv_arr = sitk.GetArrayFromImage(hbv_img).astype(np.float32)
+    # --- use T2 as reference space ---
+    ref      = t2_img
+    ref_size = ref.GetSize()
+    ref_sp   = ref.GetSpacing()
+    ref_org  = ref.GetOrigin()
+    ref_dir  = ref.GetDirection()
 
-    # sanity check: all 3 should already be aligned
-    assert t2_arr.shape == adc_arr.shape == hbv_arr.shape, \
-        f"Shape mismatch for {pid}: t2={t2_arr.shape}, adc={adc_arr.shape}, hbv={hbv_arr.shape}"
+    # resampler set to reference geometry
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetSize(ref_size)
+    resampler.SetOutputSpacing(ref_sp)
+    resampler.SetOutputOrigin(ref_org)
+    resampler.SetOutputDirection(ref_dir)
+    resampler.SetInterpolator(sitk.sitkLinear)
+
+    # T2 already in ref space
+    t2_arr = sitk.GetArrayFromImage(t2_img).astype(np.float32)  # (Z,Y,X)
+
+    # resample ADC + HBV into ref space
+    adc_res = resampler.Execute(adc_img)
+    hbv_res = resampler.Execute(hbv_img)
+
+    adc_arr = sitk.GetArrayFromImage(adc_res).astype(np.float32)
+    hbv_arr = sitk.GetArrayFromImage(hbv_res).astype(np.float32)
+
+    # now all three must match
+    if not (t2_arr.shape == adc_arr.shape == hbv_arr.shape):
+        raise RuntimeError(
+            f"After resampling, shapes still differ for {pid}: "
+            f"t2={t2_arr.shape}, adc={adc_arr.shape}, hbv={hbv_arr.shape}"
+        )
 
     vol = np.stack([t2_arr, adc_arr, hbv_arr], axis=0)  # (3, Z, Y, X)
     return vol
