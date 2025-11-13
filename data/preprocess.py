@@ -31,70 +31,70 @@ def _load_mha(path: str) -> np.ndarray:
 
 def load_patient_mri(pid, data_root):
     """
-    Loads T2, ADC, B1500 for a patient, resamples each to a shared reference
-    shape (T2 shape), and returns np array (3, Z, Y, X).
+    Load T2, ADC, HBV for a patient.
+
+    Directory structure:
+      radiology/mpMRI/<pid>/
+        <pid>_0001_t2w.mha
+        <pid>_0001_adc.mha
+        <pid>_0001_hbv.mha
+
+    Returns np.ndarray of shape (3, Z, Y, X).
     """
-    import SimpleITK as sitk
-    import numpy as np
     import os
+    import numpy as np
+    import SimpleITK as sitk
 
-    t2_path  = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0000.mha")
-    adc_path = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0001.mha")
-    b15_path = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0002.mha")
+    pid = str(pid)
+    mp_dir = os.path.join(data_root, "radiology", "mpMRI", pid)
 
-    paths = [t2_path, adc_path, b15_path]
+    t2_path  = os.path.join(mp_dir, f"{pid}_0001_t2w.mha")
+    adc_path = os.path.join(mp_dir, f"{pid}_0001_adc.mha")
+    hbv_path = os.path.join(mp_dir, f"{pid}_0001_hbv.mha")
 
-    imgs = [sitk.ReadImage(p) for p in paths]
+    for p in [t2_path, adc_path, hbv_path]:
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"Missing MRI file for patient {pid}: {p}")
 
-    # --- use T2 as reference space ---
-    ref = imgs[0]
-    ref_size   = ref.GetSize()
-    ref_spacing = ref.GetSpacing()
-    ref_origin  = ref.GetOrigin()
-    ref_dir     = ref.GetDirection()
+    t2_img  = sitk.ReadImage(t2_path)
+    adc_img = sitk.ReadImage(adc_path)
+    hbv_img = sitk.ReadImage(hbv_path)
 
-    resampler = sitk.ResampleImageFilter()
-    resampler.SetSize(ref_size)
-    resampler.SetOutputSpacing(ref_spacing)
-    resampler.SetOutputOrigin(ref_origin)
-    resampler.SetOutputDirection(ref_dir)
-    resampler.SetInterpolator(sitk.sitkLinear)
+    t2_arr  = sitk.GetArrayFromImage(t2_img).astype(np.float32)   # (Z, Y, X)
+    adc_arr = sitk.GetArrayFromImage(adc_img).astype(np.float32)
+    hbv_arr = sitk.GetArrayFromImage(hbv_img).astype(np.float32)
 
-    resampled = []
-    for img in imgs:
-        resampled_img = resampler.Execute(img)
-        arr = sitk.GetArrayFromImage(resampled_img)  # (Z, Y, X)
-        resampled.append(arr)
+    # sanity check: all 3 should already be aligned
+    assert t2_arr.shape == adc_arr.shape == hbv_arr.shape, \
+        f"Shape mismatch for {pid}: t2={t2_arr.shape}, adc={adc_arr.shape}, hbv={hbv_arr.shape}"
 
-    # Stack → shape (3, Z, Y, X)
-    vol = np.stack(resampled, axis=0).astype(np.float32)
+    vol = np.stack([t2_arr, adc_arr, hbv_arr], axis=0)  # (3, Z, Y, X)
     return vol
 
 
 def load_patient_mask(pid, data_root):
     """
-    Load prostate mask and resample to T2 reference shape.
+    Load prostate mask in T2w space.
+
+    Directory:
+      radiology/prostate_mask_t2w/
+        <pid>_0001_mask.mha
+
+    Returns np.ndarray of shape (Z, Y, X) as uint8.
     """
+    import os
     import SimpleITK as sitk
     import numpy as np
-    import os
 
-    mask_path = os.path.join(data_root, "radiology/prostate_mask_t2w", f"{pid}_0001_mask.mha")
+    pid = str(pid)
+    mask_dir = os.path.join(data_root, "radiology", "prostate_mask_t2w")
+    mask_path = os.path.join(mask_dir, f"{pid}_0001_mask.mha")
 
-    # load mask + corresponding T2 image to match shape
+    if not os.path.exists(mask_path):
+        raise FileNotFoundError(f"Missing mask file for patient {pid}: {mask_path}")
+
     mask_img = sitk.ReadImage(mask_path)
-    t2_path = os.path.join(data_root, "radiology/mpMRI", pid, f"{pid}_0000.mha")
-    t2_img = sitk.ReadImage(t2_path)
-
-    resampler = sitk.ResampleImageFilter()
-    resampler.SetSize(t2_img.GetSize())
-    resampler.SetOutputSpacing(t2_img.GetSpacing())
-    resampler.SetOutputOrigin(t2_img.GetOrigin())
-    resampler.SetOutputDirection(t2_img.GetDirection())
-    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
-
-    mask_resampled = resampler.Execute(mask_img)
-    mask_arr = sitk.GetArrayFromImage(mask_resampled).astype(np.uint8)  # (Z, Y, X)
+    mask_arr = sitk.GetArrayFromImage(mask_img).astype(np.uint8)  # (Z, Y, X)
 
     return mask_arr
 
