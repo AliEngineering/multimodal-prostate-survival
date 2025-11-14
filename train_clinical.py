@@ -13,7 +13,7 @@ from data import preprocess
 from utils.survival_loss import cox_ph_loss
 from utils.metrics import concordance_index
 from utils.wandb_utils import setup_wandb, log_metrics, finish_wandb
-from models.clinical_survnet import ClinicalSurvNet   # <--- NEW
+from models.clinical_survnet import ClinicalSurvNet  
 
 
 def set_seed(seed: int = 42):
