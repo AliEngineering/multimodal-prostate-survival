@@ -1,5 +1,4 @@
 # Multimodal Prostate Cancer Survival Prediction  
-*A Reproducible MICCAI-Style Implementation*
 
 This repository contains the complete implementation, training pipeline, and pretrained models for a multimodal deep learning system that predicts prostate cancer survival from **multi-sequence MRI** and **clinical features**.
 
