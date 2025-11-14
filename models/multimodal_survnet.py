@@ -12,7 +12,7 @@ class MultimodalSurvNet(nn.Module):
                  freeze_mri=False):
         super().__init__()
 
-        # 3D ResNet-18 backbone (pretrained if possible)
+        # 3D ResNet-18 backbone 
         try:
             weights = R3D_18_Weights.KINETICS400_V1
             self.mri_encoder = r3d_18(weights=weights)
