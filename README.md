@@ -250,18 +250,6 @@ python train_clinical_only.py \
 
 ---
 
-## Reproducibility Checklist (MICCAI)
-
-- ✔ Full code released  
-- ✔ All hyperparameters listed  
-- ✔ Full architecture descriptions  
-- ✔ Data splits provided  
-- ✔ Preprocessing fully described  
-- ✔ Logging with W&B  
-- ✔ Deterministic seed  
-- ✔ Pretrained weights released  
-
----
 
 ## Citation
 
