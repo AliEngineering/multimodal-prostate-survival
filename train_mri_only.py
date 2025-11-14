@@ -34,16 +34,17 @@ def get_dataloaders_for_fold(fold_id, batch_size, device, pad):
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
-        pin_memory=pin,
+        pin_memory=pin
     )
+
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
-        num_workers=0,
-        pin_memory=pin,
+        pin_memory=pin
     )
+
     return train_loader, val_loader
 
 
