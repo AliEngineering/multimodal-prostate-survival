@@ -31,15 +31,16 @@ All model weights (5-fold CV), prediction CSVs, and reproducibility artifacts ar
 
 This work develops and evaluates a **multimodal survival prediction model** integrating:
 
-- Three MRI modalities (`ADC.mha`, `ADC_challenge.mha`, `T2w.mha`)  
+- Three MRI modalities (`ADC.mha`, `HBV.mha`, `T2w.mha`)  
+- T2w-space prostate masks for ROI extraction  
 - Clinical features stored as JSON  
 - Time-to-event survival labels  
 - Cox proportional hazards loss  
 
 We perform **5-fold cross-validation** and provide:
-- Per-case predictions (CSV)
-- Best model checkpoint per fold (.pth)
-- All results for multimodal / MRI-only / clinical-only models
+- Per-case predictions (CSV)  
+- Best model checkpoint per fold (.pth)  
+- All results for multimodal / MRI-only / clinical-only models  
 
 ---
 
@@ -53,15 +54,25 @@ Your dataset folder must follow:
 Multimodal-Quiz/
 │
 ├── radiology/
-│   ├── Patient_001/
-│   │    ├── ADC.mha
-│   │    ├── ADC_challenge.mha
-│   │    └── T2w.mha
-│   └── ...
+│   ├── mpMRI/
+│   │   ├── 1001/
+│   │   │    ├── 1001_0001_adc.mha
+│   │   │    ├── 1001_0001_hbv.mha
+│   │   │    └── 1001_0001_t2w.mha
+│   │   ├── 1002/
+│   │   ├── 1003/
+│   │   └── ...
+│   │
+│   └── prostate_mask_t2w/
+│       ├── 1001_0001_mask.mha
+│       ├── 1002_0001_mask.mha
+│       ├── 1003_0001_mask.mha
+│       └── ...
 │
 ├── clinical_data/
-│   ├── Patient_001.json
-│   ├── Patient_002.json
+│   ├── 1001.json
+│   ├── 1002.json
+│   ├── 1003.json
 │   └── ...
 │
 └── data_split_5fold.csv
@@ -129,8 +140,8 @@ tqdm
 ## Model Architectures
 
 ### Multimodal Model (Main)
-- MRI encoder: pretrained **R3D-18**
-- Clinical MLP: LayerNorm + ReLU
+- MRI encoder: pretrained **R3D-18**  
+- Clinical MLP: LayerNorm + ReLU  
 - Fusion: concat → MLP → risk  
 - Loss: Cox proportional hazards  
 
@@ -216,13 +227,13 @@ python train_clinical_only.py \
 ## Pretrained Models (Hugging Face)
 
 - **Main**  
-  https://huggingface.co/dr3mar/prostate-multimodal-survival-main
+  https://huggingface.co/dr3mar/prostate-multimodal-survival-main  
 
 - **MRI-Only**  
-  https://huggingface.co/dr3mar/prostate-multimodal-survival-mri
+  https://huggingface.co/dr3mar/prostate-multimodal-survival-mri  
 
 - **Clinical-Only**  
-  https://huggingface.co/dr3mar/prostate-multimodal-survival-clinical
+  https://huggingface.co/dr3mar/prostate-multimodal-survival-clinical  
 
 ---
 
